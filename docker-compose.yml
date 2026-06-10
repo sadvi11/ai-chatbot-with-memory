@@ -1,0 +1,40 @@
+version: '3.8'
+services:
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=dynamodb
+      - DEBUG=1
+      - AWS_DEFAULT_REGION=us-east-1
+    networks:
+      - chatbot-network
+    healthcheck:
+      test: ["CMD", "awslocal", "dynamodb", "list-tables"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - DYNAMODB_TABLE=chatbot-conversations
+      - MODEL=claude-3-5-sonnet-20241022
+    depends_on:
+      localstack:
+        condition: service_healthy
+    networks:
+      - chatbot-network
+    command: bash -c "python setup_dynamodb.py && uvicorn main:app --host 0.0.0.0 --port 8000"
+
+networks:
+  chatbot-network:
+    driver: bridge
