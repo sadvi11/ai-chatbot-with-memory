@@ -1,9 +1,9 @@
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthCredentials
-from pydantic import BaseModel, Field, validator
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field, field_validator
 from anthropic import Anthropic
-from anthropic._exceptions import APIError, APIConnectionError
+from anthropic import APIError, APIConnectionError
 import boto3
 from botocore.exceptions import ClientError
 from datetime import datetime, timedelta
@@ -48,10 +48,10 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'your-secret-key-change-in-production')
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
-    user_id: str = Field(..., min_length=3, max_length=50, regex="^[a-zA-Z0-9_-]+$")
+    user_id: str = Field(..., min_length=3, max_length=50, pattern="^[a-zA-Z0-9_-]+$")
     model_override: Optional[str] = None
 
-    @validator('message')
+    @field_validator('message')
     def message_not_empty(cls, v):
         if not v.strip():
             raise ValueError("Message cannot be empty")
@@ -66,7 +66,7 @@ class ChatResponse(BaseModel):
 
 security = HTTPBearer()
 
-def verify_token(credentials: HTTPAuthCredentials) -> str:
+def verify_token(credentials: HTTPAuthorizationCredentials) -> str:
     try:
         token = credentials.credentials
         parts = token.split(':')
@@ -93,7 +93,7 @@ def verify_token(credentials: HTTPAuthCredentials) -> str:
         logger.error("Token verification failed")
         raise HTTPException(status_code=401, detail="Authentication failed")
 
-def get_current_user(credentials: HTTPAuthCredentials = Depends(security)) -> str:
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     return verify_token(credentials)
 
 class CircuitBreaker:
