@@ -1,262 +1,165 @@
 # AI Chatbot with Memory
 
-**Production-ready stateful AI chatbot** demonstrating enterprise-level cloud infrastructure design.
+> A stateful conversational API — conversation history persisted in DynamoDB, inference
+> through the Claude API, served by async FastAPI. Built to explore what changes when a
+> chatbot has to remember things.
 
-Built with FastAPI, Claude API, and DynamoDB. Designed for scalability, reliability, and real-time inference.
-
-**Status:** ✅ Production-Ready | 📊 Monitoring-Ready | 🚀 Interview-Ready
-
----
-
-## Executive Summary
-
-This is a **stateful AI system** that maintains conversation context across multiple interactions. Unlike stateless chatbots, this implementation persists conversation history, supports model versioning, and includes production-grade monitoring.
-
-**Why this matters:**
-- Most ML portfolios show stateless systems (lack infrastructure thinking)
-- This demonstrates stateful system design (Netflix L3/L4 requirement)
-- Shows understanding of latency, scalability, and reliability
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![DynamoDB](https://img.shields.io/badge/DynamoDB-persistence-4053D6?logo=amazondynamodb&logoColor=white)](https://aws.amazon.com/dynamodb)
+[![Claude](https://img.shields.io/badge/Claude_API-inference-D4A27F)](https://anthropic.com)
 
 ---
 
-## Architecture Overview
+## The problem this solves
+
+A stateless chatbot treats every message as the first one. That is fine for a demo and
+useless for anything real — support, tutoring, advice — where the third question only
+makes sense in light of the first two.
+
+Holding history in process memory is the easy answer and the wrong one: it dies with the
+process, it cannot be load-balanced across instances, and it caps how many users one
+server can hold. Once conversation state has to survive a restart and be readable from any
+instance, it stops being an application problem and becomes an infrastructure problem.
+
+This project is that infrastructure problem, kept small enough to read in one sitting.
+
 ---
 
-## Testing
+## How it works
+
+```
+Client
+  │  POST /chat  { message, user_id }
+  ▼
+FastAPI (async)
+  │
+  ├──▶ DynamoDB — read conversation history for user_id
+  │
+  ├──▶ Claude API — send history + new message, get completion
+  │
+  ├──▶ DynamoDB — append both turns, refresh TTL
+  ▼
+Response
+```
+
+**Data model** — table `chatbot-conversations`, partition key `user_id`:
+
+```json
+{
+  "user_id": "user_123",
+  "messages": [
+    {"role": "user",      "content": "What is ML?",          "timestamp": "..."},
+    {"role": "assistant", "content": "Machine learning is…", "timestamp": "..."}
+  ],
+  "created_at": "...",
+  "last_updated": "...",
+  "ttl": 1718981400
+}
+```
+
+Partitioning on `user_id` is the decision that matters. It spreads load evenly, keeps every
+read for one conversation on a single partition, and lets DynamoDB split as the table grows
+without the application knowing. A monotonic key — a timestamp, say — would funnel every
+write into one hot partition and throttle under exactly the load you built it for.
+
+`ttl` means abandoned conversations expire on their own instead of accumulating forever.
+
+Full design notes, failure modes and capacity maths: **[ARCHITECTURE.md](ARCHITECTURE.md)**
+
+---
+
+## Running it
 
 ```bash
-# Unit tests
-pytest test_chatbot.py -v
+git clone https://github.com/sadvi11/ai-chatbot-with-memory.git
+cd ai-chatbot-with-memory
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
 
-# Integration test
-python3 example_client.py
+cp .env.example .env          # add your ANTHROPIC_API_KEY
+python3 setup_dynamodb.py     # creates the table
+python3 main.py
+```
+
+Send a message, then ask a follow-up that only works if it remembered:
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What is machine learning?", "user_id": "user_123"}'
+
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Give me an example of that.", "user_id": "user_123"}'
+
+curl http://localhost:8000/conversation/user_123
+```
+
+The second call has no subject of its own. If it answers sensibly, the memory layer works.
+
+With Docker:
+
+```bash
+docker compose up
+```
+
+---
+
+## Design decisions
+
+**Async FastAPI, not Flask.** Nearly all of a request's wall-clock time is spent waiting on
+two network calls — DynamoDB, then Claude. Async lets one worker hold many in-flight
+requests during that wait instead of blocking a thread per request. The workload is
+I/O-bound, which is where the concurrency actually comes from.
+
+**DynamoDB, not Postgres.** Access is a single-key lookup by `user_id`, no joins, no ad-hoc
+querying. That is the shape DynamoDB is built for, and on-demand billing means an idle
+project costs cents rather than a running instance.
+
+**History is trimmed before it is sent.** Every turn makes the next prompt longer, costing
+both latency and tokens. Unbounded history degrades quietly — it never errors, it just gets
+slower and more expensive until someone looks at the bill.
+
+**Latency budget** — a design target, not a benchmark. The Claude leg dominates and varies
+with prompt length and model:
+
+| Stage | Budget |
+|---|---|
+| FastAPI overhead | ~5 ms |
+| DynamoDB read | ~100 ms |
+| Claude inference | 200–300 ms |
+| DynamoDB write | ~50 ms |
+
+Writing the budget down is what tells you where optimization is worth doing. Shaving the
+FastAPI overhead is pointless; caching the read is not.
+
+---
+
+## Failure modes considered
+
+| Failure | Handling |
+|---|---|
+| Claude API timeout or rate limit | Request timeout, graceful fallback response, retry with backoff |
+| DynamoDB latency or throttling | Circuit breaker; DAX or Redis is the next step if reads become the bottleneck |
+| Runaway conversation length | History trimmed before the prompt is assembled |
+| Concurrent writes to one conversation | Atomic append with optimistic locking |
+
+---
+
+## Tests
+
+```bash
+pytest test_chatbot.py -v      # unit
+python3 example_client.py      # end-to-end against a running server
 ```
 
 ---
 
 ## Author
 
-**Sadhvi Sharma** | Cloud & AI Engineer | Calgary, AB
+**Sadhvi Sharma** — Cloud & AI Engineer
+Nokia (5G Packet Core) → Cloud & AI Engineering
+Calgary, AB, Canada · Permanent Resident · open to relocation
 
-Built to demonstrate production-grade cloud infrastructure thinking for Netflix L3/L4 Cloud AI Engineer interviews.
-
----
-
-**Status:** ✅ Production-Ready  
-**Last Updated:** June 10, 2026  
-**Interview Ready:** YES
-# AI Chatbot with Memory
-
-Production-ready stateful AI chatbot demonstrating enterprise-level cloud infrastructure.
-
-## Quick Start
-
-git clone https://github.com/sadvi11/ai-chatbot-with-memory.git
-cd ai-chatbot-with-memory
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# Edit .env, add ANTHROPIC_API_KEY
-python3 main.py
-
-## Test
-
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What is machine learning?", "user_id": "user_123"}'
-
-curl http://localhost:8000/conversation/user_123
-
-## Key Features
-
-- Stateful conversations (remembers history)
-- FastAPI async (100+ concurrent users)
-- DynamoDB persistence (scales to millions)
-- Production-ready (error handling, monitoring)
-- Model versioning (A/B testing)
-
-## Architecture
-
-User → FastAPI → DynamoDB (read <100ms) → Claude API (200-300ms) → DynamoDB (write) → Response (<500ms P99)
-
-## Performance
-
-Inference Latency: <500ms P99
-Throughput: 100+ concurrent users
-Cost: ~$10-50/month at scale
-
-## Deployment
-
-Vercel: vercel deploy
-Docker: docker build -t ai-chatbot . && docker run -p 8000:8000
-Lambda: See ARCHITECTURE.md
-
-## Interview Talking Points
-
-This demonstrates:
-- Stateful system design
-- Scalability (DynamoDB partitioning)
-- Latency thinking
-- Reliability (error handling)
-- Cost optimization
-- Operational thinking
-
-## Author
-
-Sadhvi Sharma | Cloud & AI Engineer | Calgary, AB
-
-Production-ready for Netflix L3/L4 Cloud AI Engineer interviews.
-
-Status: ✅ Production-Ready | 🚀 Interview-Ready
-# Architecture Document - AI Chatbot with Memory
-
-For: Netflix L3/L4 Cloud AI Engineer interviews
-Author: Sadhvi Sharma
-
-## System Overview
-
-Stateful AI system combining:
-- Real-time inference (<500ms latency)
-- Persistent conversation memory
-- Cloud-native scalability (millions of users)
-- Production-grade reliability
-
-## High-Level Architecture
-
-CLIENT
-  ↓
-FastAPI (async, <50ms)
-  ↓
-DynamoDB Read (history) <100ms
-  ↓
-Claude API (inference) 200-300ms
-  ↓
-DynamoDB Write (store) <50ms
-  ↓
-RESPONSE (<500ms P99)
-
-## Request Flow
-
-Time(ms)  Component         Action
-0         Client            POST /chat
-2         FastAPI           Receive request
-4         DynamoDB          Query history
-104       DynamoDB          Response
-110       Claude API        Send request
-310       Claude API        Response
-312       DynamoDB          Store message
-362       DynamoDB          Write confirmed
-366       FastAPI           Return response
-
-Total Latency: 366ms (P50)
-
-## Data Model
-
-Table: chatbot-conversations
-Partition Key: user_id (distributes across shards)
-
-Item:
-{
-  "user_id": "user_123",
-  "messages": [
-    {"role": "user", "content": "What is ML?", "timestamp": "..."},
-    {"role": "assistant", "content": "Machine learning is...", "timestamp": "..."}
-  ],
-  "created_at": "...",
-  "last_updated": "...",
-  "ttl": 1718981400
-}
-
-## Scalability
-
-Scenario: 10M users, 1M daily active, 10 requests/user/day
-
-DynamoDB Capacity:
-- Reads/day = 1M × 10 × 2 = 20M reads/day = 231 reads/sec
-- Writes/day = 1M × 10 × 1 = 10M writes/day = 116 writes/sec
-- With on-demand billing: Auto-scales
-- Cost: ~$5-10/month
-
-Partition Strategy:
-- user_id → Hash → shard_0001, shard_0234, shard_5678
-- DynamoDB auto-splits when shard > 10GB
-- Result: No bottleneck
-
-## Failure Modes
-
-1. DynamoDB Slow
-   - Mitigation: Redis cache, circuit breaker, DAX
-
-2. Claude API Timeout
-   - Mitigation: Timeout, fallback response, rate limiting
-
-3. Server Crashes
-   - Mitigation: Limit history, error handler, resource limits
-
-4. Data Consistency
-   - Mitigation: Atomic writes with optimistic locking
-
-## Performance Optimization
-
-1. Connection Pooling
-   - Reuse DynamoDB connection
-   - Saves 50ms per request
-
-2. Message Compression
-   - Gzip: 200KB → 20KB (90% reduction)
-   - Trade: +10ms CPU
-
-3. Batch Writes
-   - 10 writes → 1 write = 5x faster
-
-## Monitoring
-
-Key Metrics:
-- Latency (P50, P95, P99)
-- Error rate
-- Model usage
-- User activity
-- DynamoDB capacity
-
-CloudWatch Alerts:
-- P99 > 1000ms
-- Error rate > 1%
-- DynamoDB throttling
-- Claude API failures
-
-## Cost Breakdown
-
-At 10K requests/day:
-
-DynamoDB: $5-10/month
-CloudWatch: $2/month
-Claude API: $100-200/month
-Total: $105-210/month
-
-## Interview Talking Points
-
-"How would you optimize for 100M users?"
-
-1. Caching Layer (Redis) - Reduce DynamoDB reads 10x
-2. Multi-region - Replicate to US/EU/APAC
-3. Model Optimization - Use Claude Haiku (2x cheaper)
-4. Compression - 90% storage reduction
-5. Batch Processing - Trade latency for throughput
-
-Cost at 100M: $50K-100K/month (reasonable)
-
-## Conclusion
-
-Demonstrates:
-- Stateful system design
-- Scalability (10M+ users)
-- Reliability (failure handling)
-- Performance (<500ms P99)
-- Cost optimization (~$10-50/month)
-- Production-ready code
-
-Why it matters: Most junior portfolios show stateless systems. This shows L3+ thinking.
-
-Status: ✅ Production-Ready
-Interview Ready: YES
+[LinkedIn](https://www.linkedin.com/in/sadhvi-sharma-5789a6249/) · [GitHub](https://github.com/sadvi11)
