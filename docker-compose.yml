@@ -27,7 +27,7 @@ services:
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_ENDPOINT_URL=http://localstack:4566
       - DYNAMODB_TABLE=chatbot-conversations
-      - MODEL=claude-3-5-sonnet-20241022
+      - MODEL=claude-sonnet-5
     depends_on:
       localstack:
         condition: service_healthy
