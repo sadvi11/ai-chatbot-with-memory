@@ -1,0 +1,44 @@
+name: Tests
+
+# This repository shipped with a fatal ImportError in main.py line 3 and no
+# CI to catch it: fastapi.security has no HTTPAuthCredentials, so the module
+# never imported and no endpoint ever served a request. The first test in
+# tests/test_app.py does nothing but import the app — that alone would have
+# caught it on the first run. A retired-model assertion guards the other
+# silent failure this repo had.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # boto3 constructs a DynamoDB resource at import time. It needs a region to
+  # do so but makes no network call, so a dummy region is enough and no AWS
+  # credentials are required to run these tests.
+  AWS_REGION: us-east-1
+
+jobs:
+  test:
+    name: Import, routes and validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest httpx
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      - name: Every Python file must compile
+        run: |
+          find . -name '*.py' -not -path './.venv/*' -print0 \
+            | xargs -0 -n1 python -m py_compile
+          echo "all Python files compile"
