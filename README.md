@@ -1,5 +1,7 @@
 # AI Chatbot with Memory
 
+[![Tests](https://github.com/sadvi11/ai-chatbot-with-memory/actions/workflows/tests.yml/badge.svg)](https://github.com/sadvi11/ai-chatbot-with-memory/actions/workflows/tests.yml)
+
 > A stateful conversational API — conversation history persisted in DynamoDB, inference
 > through the Claude API, served by async FastAPI. Built to explore what changes when a
 > chatbot has to remember things.
