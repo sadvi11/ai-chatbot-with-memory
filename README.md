@@ -165,3 +165,28 @@ Nokia (5G Packet Core) → Cloud & AI Engineering
 Calgary, AB, Canada · Permanent Resident · open to relocation
 
 [LinkedIn](https://www.linkedin.com/in/sadhvi-sharma-5789a6249/) · [GitHub](https://github.com/sadvi11)
+
+## Authentication
+
+Every request to `/chat` carries a bearer token of the form
+`user_id:expires_at:signature`, signed with HMAC-SHA256.
+
+```python
+from main import make_token
+token = make_token("alice")            # valid for TOKEN_TTL_SECONDS, default 1 hour
+```
+
+Two rules hold it up:
+
+- **`SECRET_KEY` is required.** The service raises at import if it is unset.
+  An earlier version defaulted to a string published in this repository, which
+  meant anyone could sign a token for any `user_id` and read that user's
+  conversation history.
+- **Tokens expire, and the expiry is signed.** It sits inside the signed
+  message, so extending it invalidates the signature. Without an expiry, a
+  leaked token would be valid forever and only rotating `SECRET_KEY` for
+  everyone could revoke it.
+
+```bash
+export SECRET_KEY=$(openssl rand -hex 32)
+```

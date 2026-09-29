@@ -15,6 +15,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 import hmac
 import hashlib
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,7 +45,20 @@ table = dynamodb.Table(os.getenv('DYNAMODB_TABLE', 'chatbot-conversations'))
 client = Anthropic()
 
 MODEL = os.getenv('MODEL', 'claude-sonnet-5')
-SECRET_KEY = os.getenv('SECRET_KEY', 'your-secret-key-change-in-production')
+# No default. A default here is published in this repository, so anyone could
+# forge a token for any user_id and read that user's conversation history.
+# Failing at import is loud and safe; a working-but-forgeable service is not.
+SECRET_KEY = os.getenv('SECRET_KEY')
+if not SECRET_KEY:
+    raise RuntimeError(
+        "SECRET_KEY is not set. Refusing to start: without it the HMAC that "
+        "authenticates every request has no secret, and any token could be forged. "
+        "Set SECRET_KEY to a long random value, e.g. `openssl rand -hex 32`."
+    )
+
+# Tokens expire. Without this a leaked or forged token is valid forever, and
+# there is no way to revoke it short of rotating SECRET_KEY for everyone.
+TOKEN_TTL_SECONDS = int(os.getenv('TOKEN_TTL_SECONDS', '3600'))
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
@@ -67,16 +81,30 @@ class ChatResponse(BaseModel):
 
 security = HTTPBearer()
 
+TOKEN_PARTS = 3  # user_id:expires_at:signature
+
+
+def make_token(user_id: str, ttl_seconds: Optional[int] = None) -> str:
+    """Issue a bearer token of the form user_id:expires_at:signature.
+
+    The expiry is inside the signed message, so it cannot be extended without
+    the secret.
+    """
+    ttl = TOKEN_TTL_SECONDS if ttl_seconds is None else ttl_seconds
+    message = f"{user_id}:{int(time.time()) + ttl}"
+    signature = hmac.new(SECRET_KEY.encode(), message.encode(), hashlib.sha256).hexdigest()
+    return f"{message}:{signature}"
+
+
 def verify_token(credentials: HTTPAuthorizationCredentials) -> str:
     try:
         token = credentials.credentials
         parts = token.split(':')
-        if len(parts) < 3:
+        if len(parts) != TOKEN_PARTS:
             raise HTTPException(status_code=401, detail="Invalid token")
-        
-        user_id = parts[0]
-        message = ':'.join(parts[:-1])
-        provided_signature = parts[-1]
+
+        user_id, expires_at, provided_signature = parts
+        message = f"{user_id}:{expires_at}"
 
         expected_signature = hmac.new(
             SECRET_KEY.encode(),
@@ -84,15 +112,23 @@ def verify_token(credentials: HTTPAuthorizationCredentials) -> str:
             hashlib.sha256
         ).hexdigest()
 
+        # Constant-time comparison: a fast reject on the first wrong byte would
+        # leak the signature one byte at a time.
         if not hmac.compare_digest(provided_signature, expected_signature):
             raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Only trust the expiry after the signature check, because until then
+        # it is attacker-controlled text.
+        if int(expires_at) < time.time():
+            raise HTTPException(status_code=401, detail="Token expired")
 
         return user_id
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.error("Token verification failed")
         raise HTTPException(status_code=401, detail="Authentication failed")
+
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     return verify_token(credentials)

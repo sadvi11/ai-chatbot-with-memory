@@ -20,6 +20,9 @@ env:
   # do so but makes no network call, so a dummy region is enough and no AWS
   # credentials are required to run these tests.
   AWS_REGION: us-east-1
+  # main.py now refuses to start without this, so CI must supply one.
+  # It signs nothing real: the tests issue and verify their own tokens.
+  SECRET_KEY: ci-only-secret-not-used-anywhere-else
 
 jobs:
   test:
